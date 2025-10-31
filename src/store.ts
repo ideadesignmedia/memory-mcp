@@ -1,7 +1,7 @@
 import sqlite3 from "sqlite3";
 import { randomUUID } from "crypto";
 import { MemoryItem, MemoryType } from "./types.js";
-import { nowIso, logErr } from "./util.js";
+import { nowIso, logErr, cosineSimilarity } from "./util.js";
 
 export class MemoryStore {
   private db: sqlite3.Database;
@@ -26,33 +26,66 @@ export class MemoryStore {
             expires_at text,
             pinned integer not null default 0,
             consent integer not null default 0,
-            sensitivity text not null default '[]'
+            sensitivity text not null default '[]',
+            embedding text
           );`,
           (err) => {
             if (err) logErr("fatal: migrate base table:", err.message || String(err));
-            // Try to enable FTS structures; ignore if unavailable
-            this.db.exec(
-              `create virtual table if not exists memory_fts using fts5(
-                 subject, content, content='memories', content_rowid='rowid'
-               );
-               create trigger if not exists memories_ai after insert on memories begin
-                 insert into memory_fts(rowid, subject, content) values (new.rowid, new.subject, new.content);
-               end;
-               create trigger if not exists memories_au after update on memories begin
-                 update memory_fts set subject = new.subject, content = new.content where rowid = new.rowid;
-               end;
-               create trigger if not exists memories_ad after delete on memories begin
-                 delete from memory_fts where rowid = old.rowid;
-               end;`,
-              (ftsErr) => {
-                if (ftsErr) logErr("warn: FTS5 unavailable, LIKE fallback enabled");
-                resolve();
-              }
-            );
+            this.ensureEmbeddingColumn(() => {
+              // Try to enable FTS structures; ignore if unavailable
+              this.db.exec(
+                `create virtual table if not exists memory_fts using fts5(
+                   subject, content, content='memories', content_rowid='rowid'
+                 );
+                 create trigger if not exists memories_ai after insert on memories begin
+                   insert into memory_fts(rowid, subject, content) values (new.rowid, new.subject, new.content);
+                 end;
+                 create trigger if not exists memories_au after update on memories begin
+                   update memory_fts set subject = new.subject, content = new.content where rowid = new.rowid;
+                 end;
+                 create trigger if not exists memories_ad after delete on memories begin
+                   delete from memory_fts where rowid = old.rowid;
+                 end;`,
+                (ftsErr) => {
+                  if (ftsErr) logErr("warn: FTS5 unavailable, LIKE fallback enabled");
+                  resolve();
+                }
+              );
+            });
           }
         );
       });
     });
+  }
+
+  private ensureEmbeddingColumn(callback: () => void) {
+    this.db.exec("alter table memories add column embedding text;", (err) => {
+      if (err && !(err.message && /duplicate column/i.test(err.message))) {
+        logErr("warn: add embedding column:", err.message || String(err));
+      }
+      callback();
+    });
+  }
+
+  private normalizeEmbedding(vec?: number[]): number[] | undefined {
+    if (!Array.isArray(vec)) return undefined;
+    const cleaned: number[] = [];
+    for (const value of vec) {
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      cleaned.push(value);
+      if (cleaned.length >= 4096) break;
+    }
+    return cleaned.length > 0 ? cleaned : undefined;
+  }
+
+  private parseEmbedding(raw: unknown): number[] | undefined {
+    if (raw === null || raw === undefined) return undefined;
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      return this.normalizeEmbedding(parsed as number[]);
+    } catch {
+      return undefined;
+    }
   }
 
   private run(sql: string, params: any[] = []): Promise<sqlite3.RunResult> {
@@ -86,14 +119,16 @@ export class MemoryStore {
   async insert(opts: {
     ownerId: string; type: MemoryType; subject: string; content: string;
     importance?: number; ttlDays?: number; pinned?: boolean; consent?: boolean; sensitivity?: string[];
+    embedding?: number[];
   }): Promise<string> {
     await this.ready;
     const id = randomUUID();
     const createdAt = nowIso();
     const expiresAt = opts.ttlDays ? new Date(Date.now() + opts.ttlDays * 864e5).toISOString() : null;
+    const embedding = this.normalizeEmbedding(opts.embedding);
     await this.run(
-      `insert into memories (id, owner_id, type, subject, content, importance, use_count, created_at, expires_at, pinned, consent, sensitivity)
-       values (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+      `insert into memories (id, owner_id, type, subject, content, importance, use_count, created_at, expires_at, pinned, consent, sensitivity, embedding)
+       values (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         opts.ownerId,
@@ -106,6 +141,7 @@ export class MemoryStore {
         opts.pinned ? 1 : 0,
         opts.consent ? 1 : 0,
         JSON.stringify(opts.sensitivity ?? []),
+        embedding ? JSON.stringify(embedding) : null,
       ]
     );
     return id;
@@ -140,9 +176,10 @@ export class MemoryStore {
     await this.run("BEGIN IMMEDIATE");
     try {
       for (const it of items) {
+        const embedding = this.normalizeEmbedding(it.embedding);
         await this.run(
-          `insert into memories (id, owner_id, type, subject, content, importance, use_count, created_at, last_used_at, expires_at, pinned, consent, sensitivity)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `insert into memories (id, owner_id, type, subject, content, importance, use_count, created_at, last_used_at, expires_at, pinned, consent, sensitivity, embedding)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             randomUUID(),
             ownerId,
@@ -157,6 +194,7 @@ export class MemoryStore {
             it.pinned ? 1 : 0,
             it.consent ? 1 : 0,
             JSON.stringify(it.sensitivity ?? []),
+            embedding ? JSON.stringify(embedding) : null,
           ]
         );
       }
@@ -167,8 +205,33 @@ export class MemoryStore {
     }
   }
 
-  async search(ownerId: string, query: string, slot?: MemoryType, k = 8): Promise<MemoryItem[]> {
+  async search(ownerId: string, query?: string, slot?: MemoryType, k = 8, embedding?: number[]): Promise<MemoryItem[]> {
     await this.ready;
+    const trimmedQuery = query?.trim() ?? "";
+    const hasQuery = trimmedQuery.length > 0;
+    const queryEmbedding = this.normalizeEmbedding(embedding);
+    const fetchMultiplier = queryEmbedding ? 6 : 4;
+
+    if (!hasQuery && queryEmbedding) {
+      const limit = Math.max(k * fetchMultiplier, 50);
+      const sqlEmbed = slot
+        ? `select * from memories where owner_id = ? and type = ? and embedding is not null limit ?`
+        : `select * from memories where owner_id = ? and embedding is not null limit ?`;
+      const rows = slot
+        ? await this.all<any>(sqlEmbed, [ownerId, slot, limit])
+        : await this.all<any>(sqlEmbed, [ownerId, limit]);
+      return rows
+        .map((r) => this.rowToItem(r))
+        .map((item) => ({ item, sim: cosineSimilarity(queryEmbedding, item.embedding) }))
+        .sort((a, b) => b.sim - a.sim)
+        .slice(0, k)
+        .map(({ item }) => item);
+    }
+
+    if (!hasQuery) {
+      return this.list(ownerId, slot, Math.max(50, k * fetchMultiplier));
+    }
+
     const base = `
       select m.* from memory_fts f
       join memories m on m.rowid = f.rowid
@@ -177,19 +240,31 @@ export class MemoryStore {
     const sql = slot ? `${base} and m.type = ? limit ?` : `${base} limit ?`;
     try {
       const rows = slot
-        ? await this.all<any>(sql, [ownerId, query, slot, k * 4])
-        : await this.all<any>(sql, [ownerId, query, k * 4]);
-      return rows.map((r) => this.rowToItem(r));
+        ? await this.all<any>(sql, [ownerId, trimmedQuery, slot, k * fetchMultiplier])
+        : await this.all<any>(sql, [ownerId, trimmedQuery, k * fetchMultiplier]);
+      const items = rows.map((r) => this.rowToItem(r));
+      if (!queryEmbedding) return items;
+      return items
+        .map((item) => ({ item, sim: cosineSimilarity(queryEmbedding, item.embedding) }))
+        .sort((a, b) => b.sim - a.sim)
+        .slice(0, k)
+        .map(({ item }) => item);
     } catch {
-      const esc = query.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+      const esc = trimmedQuery.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
       const like = `%${esc}%`;
       const sqlLike = slot
         ? `select * from memories where owner_id = ? and type = ? and (subject like ? escape '\\' or content like ? escape '\\') limit ?`
         : `select * from memories where owner_id = ? and (subject like ? escape '\\' or content like ? escape '\\') limit ?`;
       const rows = slot
-        ? await this.all<any>(sqlLike, [ownerId, slot, like, like, k * 4])
-        : await this.all<any>(sqlLike, [ownerId, like, like, k * 4]);
-      return rows.map((r) => this.rowToItem(r));
+        ? await this.all<any>(sqlLike, [ownerId, slot, like, like, k * fetchMultiplier])
+        : await this.all<any>(sqlLike, [ownerId, like, like, k * fetchMultiplier]);
+      const items = rows.map((r) => this.rowToItem(r));
+      if (!queryEmbedding) return items;
+      return items
+        .map((item) => ({ item, sim: cosineSimilarity(queryEmbedding, item.embedding) }))
+        .sort((a, b) => b.sim - a.sim)
+        .slice(0, k)
+        .map(({ item }) => item);
     }
   }
 
@@ -201,6 +276,7 @@ export class MemoryStore {
     } catch {
       sensitivity = [];
     }
+    const embedding = this.parseEmbedding(row.embedding);
     return {
       id: row.id,
       ownerId: row.owner_id,
@@ -215,6 +291,7 @@ export class MemoryStore {
       pinned: !!row.pinned,
       consent: !!row.consent,
       sensitivity,
+      embedding,
     };
   }
 }

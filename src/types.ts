@@ -14,4 +14,5 @@ export interface MemoryItem {
   pinned: boolean;
   consent: boolean;
   sensitivity: string[];
+  embedding?: number[];
 }

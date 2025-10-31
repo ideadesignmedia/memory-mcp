@@ -6,6 +6,7 @@ Highlights
 - Uses `sqlite3` (async) for broad prebuilt support; no brittle native build steps.
 - Optional FTS5 indexing for better search; falls back to `LIKE` when unavailable.
 - Input validation and sane limits to guard against oversized payloads.
+- Auto-generates semantic embeddings via OpenAI when a key is provided; otherwise falls back to text-only scoring.
 
 ## Install / Run
 
@@ -26,6 +27,10 @@ Other ecosystem equivalents:
 
 ## CLI usage
 You can invoke it directly (if globally installed) or via npx as shown above.
+
+Optional flags:
+- `--embed-key=sk-...` supply the embedding API key (same as `MEMORY_EMBEDDING_KEY`).
+- `--embed-model=text-embedding-3-small` override the embedding model (same as `MEMORY_EMBED_MODEL`).
 
 ## Codex config example
 Using npx so no global install is required. Add to `~/.codex/config.toml`:
@@ -49,7 +54,11 @@ const id = await store.insert({
 });
 
 // Run as an MCP server over stdio
-await runStdioServer({ dbPath: "./memory.db", defaultTopK: 6 });
+await runStdioServer({
+  dbPath: "./memory.db",
+  defaultTopK: 6,
+  embeddingApiKey: process.env.MEMORY_EMBEDDING_KEY, // optional
+});
 ```
 
 ## Tools
@@ -61,6 +70,12 @@ await runStdioServer({ dbPath: "./memory.db", defaultTopK: 6 });
 - memory.import
 
 All tools are safe for STDIO. The server writes logs to stderr only.
+
+## Embeddings
+## Embeddings
+Embeddings are optional—without a key the server relies on text search and recency heuristics.
+
+Set `MEMORY_EMBEDDING_KEY` (or pass `--embed-key=...` to the CLI) to automatically create embeddings when remembering/importing memories and to embed recall queries. The default model is `text-embedding-3-small`; override it with `MEMORY_EMBED_MODEL` or `--embed-model`. To disable the built-in generator when using the programmatic API, pass `embeddingProvider: null` to `createMemoryMcpServer`. To specify a key programmatically, pass `embeddingApiKey: "sk-..."`.
 
 Limits and validation
 - memory.remember: `subject` max 160 chars, `content` max 1000, `sensitivity` up to 32 tags.
