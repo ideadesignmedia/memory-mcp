@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAIClient, { type OpenAIClientConfig } from "@ideadesignmedia/open-ai.js";
 import { logErr } from "./util.js";
 
 export interface EmbeddingProvider {
@@ -23,19 +23,21 @@ function extractVector(result: { data?: Array<{ embedding?: number[] }> }, conte
 export function createOpenAiEmbeddingProvider(opts: OpenAiEmbeddingOptions = {}): EmbeddingProvider {
   const apiKey = opts.apiKey || process.env.MEMORY_EMBEDDING_KEY;
   if (!apiKey) throw new Error("Missing embedding API key. Set MEMORY_EMBEDDING_KEY.");
-  const client = new OpenAI({
-    apiKey,
-    baseURL: opts.baseURL || process.env.MEMORY_EMBEDDING_BASE_URL,
-  });
+
+  const config: OpenAIClientConfig = { key: apiKey };
+  if (opts.baseURL || process.env.MEMORY_EMBEDDING_BASE_URL) {
+    config.host = opts.baseURL || process.env.MEMORY_EMBEDDING_BASE_URL;
+  }
+  const client = new OpenAIClient(config);
   const model = opts.model || process.env.MEMORY_EMBED_MODEL || "text-embedding-3-small";
 
   return {
     async embedDocument(text: string) {
-      const res = await client.embeddings.create({ model, input: text });
+      const res = await client.getEmbedding(text, model);
       return extractVector(res, "document");
     },
     async embedQuery(text: string) {
-      const res = await client.embeddings.create({ model, input: text });
+      const res = await client.getEmbedding(text, model);
       return extractVector(res, "query");
     },
   };

@@ -1,6 +1,6 @@
 {
   "name": "@ideadesignmedia/memory-mcp",
-  "version": "0.1.2",
+  "version": "1.0.1",
   "type": "module",
   "description": "SQLite-backed MCP memory server and library",
   "license": "MIT",
@@ -50,14 +50,14 @@
     "dev": "tsx src/cli.ts",
     "build": "tsc",
     "start": "node dist/cli.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/**/*.test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.2",
-    "sqlite3": "^5.1.7",
+    "@ideadesignmedia/open-ai.js": "^2.1.18",
     "dotenv": "^16.4.5",
-    "zod": "^3.23.8",
-    "openai": "^4.63.0"
+    "sqlite3": "^5.1.7",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",

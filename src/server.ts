@@ -1,10 +1,17 @@
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import OpenAIModule from "@ideadesignmedia/open-ai.js";
+import type { JsonRecord } from "@ideadesignmedia/open-ai.js";
 import { MemoryStore } from "./store.js";
-import { MemoryItem } from "./types.js";
+import { MemoryItem, MemoryType } from "./types.js";
 import { recencyDecay, logErr, cosineSimilarity } from "./util.js";
-import { EmbeddingProvider, createDefaultEmbeddingProvider, createOpenAiEmbeddingProvider } from "./embeddings.js";
+import {
+  EmbeddingProvider,
+  createDefaultEmbeddingProvider,
+  createOpenAiEmbeddingProvider,
+} from "./embeddings.js";
+
+const { McpServer, defineFunctionTool, defineObjectSchema } =
+  OpenAIModule as unknown as typeof import("@ideadesignmedia/open-ai.js");
 
 export type ServerOptions = {
   dbPath: string;
@@ -15,6 +22,229 @@ export type ServerOptions = {
 };
 
 const MAX_EMBEDDING_SIZE = 4096;
+const memoryTypeValues = ["preference", "profile", "project", "fact", "constraint"] as const;
+
+const rememberParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    ownerId: { type: "string", minLength: 1 },
+    type: { type: "string", enum: [...memoryTypeValues] },
+    subject: { type: "string", minLength: 1, maxLength: 160 },
+    content: { type: "string", minLength: 1, maxLength: 1000 },
+    importance: { type: "number", minimum: 0, maximum: 1 },
+    ttlDays: { type: "integer", minimum: 1 },
+    pinned: { type: "boolean" },
+    consent: { type: "boolean" },
+    sensitivity: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: 32,
+    },
+    embedding: {
+      type: "array",
+      items: { type: "number" },
+      minItems: 1,
+      maxItems: MAX_EMBEDDING_SIZE,
+    },
+  },
+  required: ["ownerId", "type", "subject", "content"],
+  additionalProperties: false,
+} as const);
+
+const recallParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    ownerId: { type: "string", minLength: 1 },
+    query: { type: "string", maxLength: 1000 },
+    slot: { type: "string", enum: [...memoryTypeValues] },
+    k: { type: "integer", minimum: 1, maximum: 20 },
+    embedding: {
+      type: "array",
+      items: { type: "number" },
+      minItems: 1,
+      maxItems: MAX_EMBEDDING_SIZE,
+    },
+  },
+  required: ["ownerId"],
+  additionalProperties: false,
+} as const);
+
+const listParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    ownerId: { type: "string", minLength: 1 },
+    slot: { type: "string", enum: [...memoryTypeValues] },
+  },
+  required: ["ownerId"],
+  additionalProperties: false,
+} as const);
+
+const forgetParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    id: { type: "string", minLength: 1 },
+  },
+  required: ["id"],
+  additionalProperties: false,
+} as const);
+
+const exportParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    ownerId: { type: "string", minLength: 1 },
+  },
+  required: ["ownerId"],
+  additionalProperties: false,
+} as const);
+
+const importItemSchema = defineObjectSchema({
+  type: "object",
+  properties: {
+    type: { type: "string", enum: [...memoryTypeValues] },
+    subject: { type: "string", minLength: 1, maxLength: 160 },
+    content: { type: "string", minLength: 1, maxLength: 1000 },
+    importance: { type: "number", minimum: 0, maximum: 1 },
+    useCount: { type: "integer", minimum: 0 },
+    lastUsedAt: { type: "string" },
+    expiresAt: { type: "string" },
+    pinned: { type: "boolean" },
+    consent: { type: "boolean" },
+    sensitivity: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: 32,
+    },
+    embedding: {
+      type: "array",
+      items: { type: "number" },
+      minItems: 1,
+      maxItems: MAX_EMBEDDING_SIZE,
+    },
+  },
+  required: ["type", "subject", "content"],
+  additionalProperties: false,
+} as const);
+
+const importParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    ownerId: { type: "string", minLength: 1 },
+    items: {
+      type: "array",
+      items: importItemSchema,
+      maxItems: 1000,
+    },
+  },
+  required: ["ownerId", "items"],
+  additionalProperties: false,
+} as const);
+
+const rememberInputSchema = z.object({
+  ownerId: z.string().min(1),
+  type: z.enum(memoryTypeValues),
+  subject: z.string().min(1).max(160),
+  content: z.string().min(1).max(1000),
+  importance: z.number().min(0).max(1).optional(),
+  ttlDays: z.number().int().positive().optional(),
+  pinned: z.boolean().optional(),
+  consent: z.boolean().optional(),
+  sensitivity: z.array(z.string()).max(32).optional(),
+  embedding: z.array(z.number()).min(1).max(MAX_EMBEDDING_SIZE).optional(),
+});
+
+const recallInputSchema = z.object({
+  ownerId: z.string().min(1),
+  query: z.string().max(1000).optional(),
+  slot: z.enum(memoryTypeValues).optional(),
+  k: z.number().int().positive().max(20).optional(),
+  embedding: z.array(z.number()).min(1).max(MAX_EMBEDDING_SIZE).optional(),
+});
+
+const listInputSchema = z.object({
+  ownerId: z.string().min(1),
+  slot: z.enum(memoryTypeValues).optional(),
+});
+
+const forgetInputSchema = z.object({
+  id: z.string().min(1),
+});
+
+const importItemInputSchema = z.object({
+  type: z.enum(memoryTypeValues),
+  subject: z.string().min(1).max(160),
+  content: z.string().min(1).max(1000),
+  importance: z.number().min(0).max(1).optional(),
+  useCount: z.number().int().min(0).optional(),
+  lastUsedAt: z.string().optional(),
+  expiresAt: z.string().optional(),
+  pinned: z.boolean().optional(),
+  consent: z.boolean().optional(),
+  sensitivity: z.array(z.string()).max(32).optional(),
+  embedding: z.array(z.number()).min(1).max(MAX_EMBEDDING_SIZE).optional(),
+});
+
+const exportInputSchema = z.object({
+  ownerId: z.string().min(1),
+});
+
+const importInputSchema = z.object({
+  ownerId: z.string().min(1),
+  items: z.array(importItemInputSchema).max(1000),
+});
+
+const rememberTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory.remember",
+    description: "Store a small, high-value fact with optional TTL",
+    parameters: rememberParameters,
+  },
+} as const);
+
+const recallTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory.recall",
+    description: "Retrieve up to k relevant memory items",
+    parameters: recallParameters,
+  },
+} as const);
+
+const listTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory.list",
+    description: "List memories for an owner, optionally by slot",
+    parameters: listParameters,
+  },
+} as const);
+
+const forgetTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory.forget",
+    description: "Delete a memory by id",
+    parameters: forgetParameters,
+  },
+} as const);
+
+const exportTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory.export",
+    description: "Export memory items as JSON",
+    parameters: exportParameters,
+  },
+} as const);
+
+const importTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory.import",
+    description: "Bulk import memory items for an owner",
+    parameters: importParameters,
+  },
+} as const);
 
 function sanitizeEmbeddingInput(vec?: number[]): number[] | undefined {
   if (!Array.isArray(vec)) return undefined;
@@ -53,6 +283,26 @@ function memoryToEmbeddingText(subject: string, content: string) {
   return `${subject}\n\n${content}`.trim();
 }
 
+function serializeMemoryItem(item: MemoryItem): JsonRecord {
+  const result: JsonRecord = {
+    id: item.id,
+    ownerId: item.ownerId,
+    type: item.type,
+    subject: item.subject,
+    content: item.content,
+    importance: item.importance,
+    useCount: item.useCount,
+    createdAt: item.createdAt,
+    pinned: item.pinned,
+    consent: item.consent,
+    sensitivity: item.sensitivity,
+  };
+  if (item.lastUsedAt) result.lastUsedAt = item.lastUsedAt;
+  if (item.expiresAt) result.expiresAt = item.expiresAt;
+  if (item.embedding) result.embedding = item.embedding;
+  return result;
+}
+
 export function createMemoryMcpServer({
   dbPath,
   defaultTopK = 6,
@@ -61,7 +311,6 @@ export function createMemoryMcpServer({
   embeddingModel,
 }: ServerOptions) {
   const store = new MemoryStore(dbPath);
-  const server = new McpServer({ name: "memory-mcp", version: "0.1.0" });
   const resolvedKey = embeddingApiKey ?? process.env.MEMORY_EMBEDDING_KEY ?? undefined;
   const embeddingProvider =
     providedEmbeddingProvider === null
@@ -71,51 +320,32 @@ export function createMemoryMcpServer({
           ? createOpenAiEmbeddingProvider({ apiKey: resolvedKey, model: embeddingModel ?? undefined })
           : createDefaultEmbeddingProvider());
 
-  server.registerTool(
-    "memory.remember",
-    {
-      title: "Remember a fact",
-      description: "Store a small, high-value fact with optional TTL",
-      inputSchema: {
-        ownerId: z.string(),
-        type: z.enum(["preference", "profile", "project", "fact", "constraint"]),
-        subject: z.string().min(1).max(160),
-        content: z.string().min(1).max(1000),
-        importance: z.number().min(0).max(1).optional(),
-        ttlDays: z.number().int().positive().optional(),
-        pinned: z.boolean().optional(),
-        consent: z.boolean().optional(),
-        sensitivity: z.array(z.string()).max(32).optional(),
-        embedding: z.array(z.number()).min(1).max(4096).optional()
-      },
-      outputSchema: { id: z.string() }
-    },
-    async (args) => {
+  const server = new McpServer({
+    transports: ["stdio"],
+  });
+
+  server.registerTool({
+    tool: rememberTool,
+    async handler(rawArgs) {
+      const args = rememberInputSchema.parse(rawArgs);
       await store.cleanupExpired(args.ownerId);
+
       const providedEmbedding = sanitizeEmbeddingInput(args.embedding);
       const autoEmbedding =
         providedEmbedding ??
         (await tryEmbedDocument(embeddingProvider, memoryToEmbeddingText(args.subject, args.content)));
-      const id = await store.insert({ ...args, embedding: autoEmbedding });
-      return { structuredContent: { id }, content: [{ type: "text", text: id }] };
-    }
-  );
 
-  server.registerTool(
-    "memory.recall",
-    {
-      title: "Recall facts",
-      description: "Retrieve up to k relevant memory items",
-      inputSchema: {
-        ownerId: z.string(),
-        query: z.string().max(1000).optional(),
-        slot: z.enum(["preference", "profile", "project", "fact", "constraint"]).optional(),
-        k: z.number().int().positive().max(20).optional(),
-        embedding: z.array(z.number()).min(1).max(4096).optional()
-      },
-      outputSchema: { items: z.array(z.any()) }
+      const { embedding, ...rest } = args;
+      const id = await store.insert({ ...rest, embedding: autoEmbedding });
+      return { id, content: [{ type: "text", text: id }] } satisfies JsonRecord;
     },
-    async ({ ownerId, query, slot, k, embedding }) => {
+  });
+
+  server.registerTool({
+    tool: recallTool,
+    async handler(rawArgs) {
+      const { ownerId, query, slot, k, embedding } = recallInputSchema.parse(rawArgs);
+
       await store.cleanupExpired(ownerId);
       const topk = k ?? defaultTopK;
       const trimmedQuery = query?.trim() ?? "";
@@ -132,7 +362,7 @@ export function createMemoryMcpServer({
       const textMatches = new Set<string>();
 
       if (hasQuery) {
-        const textCandidates = await store.search(ownerId, trimmedQuery, slot, candidateRequestSize, queryEmbedding);
+        const textCandidates = await store.search(ownerId, trimmedQuery, slot as MemoryType | undefined, candidateRequestSize, queryEmbedding);
         for (const item of textCandidates) {
           candidates.set(item.id, item);
           textMatches.add(item.id);
@@ -140,14 +370,14 @@ export function createMemoryMcpServer({
       }
 
       if (queryEmbedding) {
-        const embedCandidates = await store.search(ownerId, undefined, slot, candidateRequestSize, queryEmbedding);
+        const embedCandidates = await store.search(ownerId, undefined, slot as MemoryType | undefined, candidateRequestSize, queryEmbedding);
         for (const item of embedCandidates) {
           candidates.set(item.id, item);
         }
       }
 
       if (!hasQuery && !queryEmbedding) {
-        const fallback = await store.list(ownerId, slot, Math.max(50, topk * 10));
+        const fallback = await store.list(ownerId, slot as MemoryType | undefined, Math.max(50, topk * 10));
         for (const item of fallback) {
           candidates.set(item.id, item);
         }
@@ -187,98 +417,89 @@ export function createMemoryMcpServer({
         }
       }
 
-      return { structuredContent: { items: scored }, content: [{ type: "text", text: JSON.stringify(scored, null, 2) }] };
-    }
-  );
-
-  server.registerTool(
-    "memory.list",
-    {
-      title: "List all",
-      description: "List memories for an owner, optionally by slot",
-      inputSchema: { ownerId: z.string(), slot: z.enum(["preference","profile","project","fact","constraint"]).optional() },
-      outputSchema: { items: z.array(z.any()) }
+      const serialized = scored.map(serializeMemoryItem);
+      return {
+        items: serialized,
+        content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }],
+      } satisfies JsonRecord;
     },
-    async ({ ownerId, slot }) => {
+  });
+
+  server.registerTool({
+    tool: listTool,
+    async handler(rawArgs) {
+      const { ownerId, slot } = listInputSchema.parse(rawArgs);
       await store.cleanupExpired(ownerId);
-      const items = await store.list(ownerId, slot);
-      return { structuredContent: { items }, content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
-    }
-  );
-
-  server.registerTool(
-    "memory.forget",
-    {
-      title: "Forget one",
-      description: "Delete a memory by id",
-      inputSchema: { id: z.string() },
-      outputSchema: { ok: z.boolean() }
+      const items = await store.list(ownerId, slot as MemoryType | undefined);
+      const serialized = items.map(serializeMemoryItem);
+      return {
+        items: serialized,
+        content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }],
+      } satisfies JsonRecord;
     },
-    async ({ id }) => {
+  });
+
+  server.registerTool({
+    tool: forgetTool,
+    async handler(rawArgs) {
+      const { id } = forgetInputSchema.parse(rawArgs);
       await store.forget(id);
-      return { structuredContent: { ok: true }, content: [{ type: "text", text: "true" }] };
-    }
-  );
-
-  server.registerTool(
-    "memory.export",
-    {
-      title: "Export all for owner",
-      description: "Export memory items as JSON",
-      inputSchema: { ownerId: z.string() },
-      outputSchema: { items: z.array(z.any()) }
+      return { ok: true, content: [{ type: "text", text: "true" }] } satisfies JsonRecord;
     },
-    async ({ ownerId }) => {
+  });
+
+  server.registerTool({
+    tool: exportTool,
+    async handler(rawArgs) {
+      const { ownerId } = exportInputSchema.parse(rawArgs);
       const items = await store.export(ownerId);
-      return { structuredContent: { items }, content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
-    }
-  );
-
-  server.registerTool(
-    "memory.import",
-    {
-      title: "Import items",
-      description: "Bulk import memory items for an owner",
-      inputSchema: {
-        ownerId: z.string(),
-        items: z.array(z.object({
-          type: z.enum(["preference","profile","project","fact","constraint"]),
-          subject: z.string().min(1).max(160),
-          content: z.string().min(1).max(1000),
-          importance: z.number().min(0).max(1).optional(),
-          useCount: z.number().int().min(0).optional(),
-          lastUsedAt: z.string().optional(),
-          expiresAt: z.string().optional(),
-          pinned: z.boolean().optional(),
-          consent: z.boolean().optional(),
-          sensitivity: z.array(z.string()).max(32).optional(),
-          embedding: z.array(z.number()).min(1).max(4096).optional()
-        })).max(1000)
-      },
-      outputSchema: { ok: z.boolean() }
+      const serialized = items.map(serializeMemoryItem);
+      return {
+        items: serialized,
+        content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }],
+      } satisfies JsonRecord;
     },
-    async ({ ownerId, items }) => {
+  });
+
+  server.registerTool({
+    tool: importTool,
+    async handler(rawArgs) {
+      const { ownerId, items } = importInputSchema.parse(rawArgs);
       if (items.length > 1000) {
         throw new Error("Too many items: max 1000");
       }
-      const prepared = [];
+
+      const prepared: Array<Omit<MemoryItem, "id" | "ownerId" | "createdAt">> = [];
       for (const item of items) {
-        const providedEmbedding = sanitizeEmbeddingInput((item as any).embedding);
+        const providedEmbedding = sanitizeEmbeddingInput(item.embedding);
         const embeddingVector =
           providedEmbedding ??
           (await tryEmbedDocument(embeddingProvider, memoryToEmbeddingText(item.subject, item.content)));
-        prepared.push({ ...item, embedding: embeddingVector });
+
+        prepared.push({
+          type: item.type as MemoryType,
+          subject: item.subject,
+          content: item.content,
+          importance: item.importance ?? 0.5,
+          useCount: item.useCount ?? 0,
+          lastUsedAt: item.lastUsedAt,
+          expiresAt: item.expiresAt,
+          pinned: item.pinned ?? false,
+          consent: item.consent ?? false,
+          sensitivity: item.sensitivity ?? [],
+          embedding: embeddingVector,
+        });
       }
-      await store.import(ownerId, prepared as any);
-      return { structuredContent: { ok: true }, content: [{ type: "text", text: "true" }] };
-    }
-  );
+
+      await store.import(ownerId, prepared);
+      return { ok: true, content: [{ type: "text", text: "true" }] } satisfies JsonRecord;
+    },
+  });
 
   return server;
 }
 
 export async function runStdioServer(opts: ServerOptions) {
   const server = createMemoryMcpServer(opts);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await server.start();
 }
