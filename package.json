@@ -1,0 +1,70 @@
+{
+  "name": "@ideadesignmedia/memory-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SQLite-backed MCP memory server and library",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ideadesignmedia/memory-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model context protocol",
+    "memory",
+    "sqlite",
+    "agents"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "import": "./dist/store.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "bin": {
+    "memory-mcp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "sqlite3": "^5.1.7",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/sqlite3": "^3.1.8",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
