@@ -67,40 +67,29 @@ All tools are safe for STDIO. The server writes logs to stderr only.
 
 - memory-remember
   - Create a concise memory for an owner. Provide `ownerId`, `type` (slot), short `subject`, and `content`. Optionally set `importance` (0–1), `ttlDays`, `pinned`, `consent`, `sensitivity` (tags), and `embedding`.
-  - Response now includes the saved item, ready for model use:
+  - Response is minimal for LLMs (no embeddings or extra metadata):
     ```json
     {
       "id": "mem_...",
-      "item": {
-        "id": "mem_...",
-        "ownerId": "user-123",
-        "type": "preference",
-        "subject": "favorite color",
-        "content": "blue",
-        "importance": 0.5,
-        "useCount": 0,
-        "createdAt": "2024-01-01T00:00:00.000Z",
-        "pinned": false,
-        "consent": false,
-        "sensitivity": []
-      },
-      "content": [
-        { "type": "text", "text": "{...same as item, pretty-printed...}" }
-      ]
+      "item": { "id": "mem_...", "type": "preference", "subject": "favorite color", "content": "blue" },
+      "content": [ { "type": "text", "text": "{\"id\":\"mem_...\",\"type\":\"preference\",\"subject\":\"favorite color\",\"content\":\"blue\"}" } ]
     }
     ```
 
 - memory-recall
-  - Retrieve up to `k` relevant memories for an owner via text/semantic search. Accepts optional natural-language `query`, optional `embedding`, and optional `slot` (type). Returns ranked `items` and a JSON `content` mirror.
+  - Retrieve up to `k` relevant memories for an owner via text/semantic search. Accepts optional natural-language `query`, optional `embedding`, and optional `slot` (type).
+  - Response is minimal per item: `{ id, type, subject, content }`.
 
 - memory-list
-  - List recent memories for an owner, optionally filtered by `slot` (type). Returns `items` and a JSON `content` mirror.
+  - List recent memories for an owner, optionally filtered by `slot` (type).
+  - Response is minimal per item: `{ id, type, subject, content }`.
 
 - memory-forget
   - Delete a memory by `id`. Consider recalling/listing first if you need to verify the item.
 
 - memory-export
   - Export all memories for an owner as a JSON array. Useful for backup/migration.
+  - Response items are minimal: `{ id, type, subject, content }`.
 
 - memory-import
   - Bulk import memories for an owner. Each item mirrors the memory schema (`type`, `subject`, `content`, metadata, optional `embedding`). Max 1000 items per call.

@@ -197,7 +197,7 @@ const rememberTool = defineFunctionTool({
   function: {
     name: "memory-remember",
     description:
-      "Create a concise memory for an owner. Provide a type (slot), short subject and content. Optionally include importance (0-1), ttlDays, pinned, consent, sensitivity tags, and an embedding. Returns the saved memory with id, subject, and content for immediate use by the model.",
+      "Create a concise memory for an owner. Provide a type (slot), short subject and content. Optionally include importance (0-1), ttlDays, pinned, consent, sensitivity tags, and an embedding. Response is minimal: { id, type, subject, content } (no embeddings or extra metadata).",
     parameters: rememberParameters,
   },
 } as const);
@@ -289,24 +289,19 @@ function memoryToEmbeddingText(subject: string, content: string) {
   return `${subject}\n\n${content}`.trim();
 }
 
+function truncate(text: string, max = 280): string {
+  if (typeof text !== "string") return "";
+  if (text.length <= max) return text;
+  return text.slice(0, Math.max(0, max - 1)) + "…";
+}
+
 function serializeMemoryItem(item: MemoryItem): JsonRecord {
-  const result: JsonRecord = {
+  return {
     id: item.id,
-    ownerId: item.ownerId,
     type: item.type,
-    subject: item.subject,
-    content: item.content,
-    importance: item.importance,
-    useCount: item.useCount,
-    createdAt: item.createdAt,
-    pinned: item.pinned,
-    consent: item.consent,
-    sensitivity: item.sensitivity,
-  };
-  if (item.lastUsedAt) result.lastUsedAt = item.lastUsedAt;
-  if (item.expiresAt) result.expiresAt = item.expiresAt;
-  if (item.embedding) result.embedding = item.embedding;
-  return result;
+    subject: truncate(item.subject, 160),
+    content: truncate(item.content, 280),
+  } as const;
 }
 
 export function createMemoryMcpServer({
@@ -344,11 +339,13 @@ export function createMemoryMcpServer({
       const { embedding, ...rest } = args;
       const id = await store.insert({ ...rest, embedding: autoEmbedding });
       const saved = await store.get(id);
-      const serialized = saved ? serializeMemoryItem(saved) : { id } as JsonRecord;
+      const lite: JsonRecord = saved
+        ? { id: saved.id, type: saved.type, subject: saved.subject, content: saved.content }
+        : { id };
       return {
         id,
-        item: serialized,
-        content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }],
+        item: lite,
+        content: [{ type: "text", text: JSON.stringify(lite) }],
       } satisfies JsonRecord;
     },
   });
