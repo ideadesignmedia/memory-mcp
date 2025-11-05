@@ -157,6 +157,13 @@ export class MemoryStore {
     await this.run("delete from memories where id = ?", [id]);
   }
 
+  async get(id: string): Promise<MemoryItem | undefined> {
+    await this.ready;
+    const rows = await this.all<any>("select * from memories where id = ? limit 1", [id]);
+    if (!rows || rows.length === 0) return undefined;
+    return this.rowToItem(rows[0]);
+  }
+
   async list(ownerId: string, slot?: MemoryType, limit = 200): Promise<MemoryItem[]> {
     await this.ready;
     const rows = slot

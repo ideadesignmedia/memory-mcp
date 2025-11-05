@@ -195,8 +195,9 @@ const importInputSchema = z.object({
 const rememberTool = defineFunctionTool({
   type: "function",
   function: {
-    name: "memory.remember",
-    description: "Store a small, high-value fact with optional TTL",
+    name: "memory-remember",
+    description:
+      "Create a concise memory for an owner. Provide a type (slot), short subject and content. Optionally include importance (0-1), ttlDays, pinned, consent, sensitivity tags, and an embedding. Returns the saved memory with id, subject, and content for immediate use by the model.",
     parameters: rememberParameters,
   },
 } as const);
@@ -204,8 +205,9 @@ const rememberTool = defineFunctionTool({
 const recallTool = defineFunctionTool({
   type: "function",
   function: {
-    name: "memory.recall",
-    description: "Retrieve up to k relevant memory items",
+    name: "memory-recall",
+    description:
+      "Retrieve up to k relevant memories for an owner by semantic/text search. Provide optional natural-language query and/or embedding, and an optional type (slot). Returns ranked items with subject, content, importance, recency, and id.",
     parameters: recallParameters,
   },
 } as const);
@@ -213,8 +215,9 @@ const recallTool = defineFunctionTool({
 const listTool = defineFunctionTool({
   type: "function",
   function: {
-    name: "memory.list",
-    description: "List memories for an owner, optionally by slot",
+    name: "memory-list",
+    description:
+      "List recent memories for an owner, optionally filtered by type (slot). Useful when you want the full set without search.",
     parameters: listParameters,
   },
 } as const);
@@ -222,8 +225,9 @@ const listTool = defineFunctionTool({
 const forgetTool = defineFunctionTool({
   type: "function",
   function: {
-    name: "memory.forget",
-    description: "Delete a memory by id",
+    name: "memory-forget",
+    description:
+      "Delete a memory by id. Use after validating the item via recall/list if uncertain.",
     parameters: forgetParameters,
   },
 } as const);
@@ -231,8 +235,9 @@ const forgetTool = defineFunctionTool({
 const exportTool = defineFunctionTool({
   type: "function",
   function: {
-    name: "memory.export",
-    description: "Export memory items as JSON",
+    name: "memory-export",
+    description:
+      "Export all memories for an owner as JSON array. Useful for backup, migration, or offline inspection.",
     parameters: exportParameters,
   },
 } as const);
@@ -240,8 +245,9 @@ const exportTool = defineFunctionTool({
 const importTool = defineFunctionTool({
   type: "function",
   function: {
-    name: "memory.import",
-    description: "Bulk import memory items for an owner",
+    name: "memory-import",
+    description:
+      "Bulk import memories for an owner. Each item mirrors the memory schema (type, subject, content, metadata, optional embedding). Max 1000 items per call.",
     parameters: importParameters,
   },
 } as const);
@@ -337,7 +343,13 @@ export function createMemoryMcpServer({
 
       const { embedding, ...rest } = args;
       const id = await store.insert({ ...rest, embedding: autoEmbedding });
-      return { id, content: [{ type: "text", text: id }] } satisfies JsonRecord;
+      const saved = await store.get(id);
+      const serialized = saved ? serializeMemoryItem(saved) : { id } as JsonRecord;
+      return {
+        id,
+        item: serialized,
+        content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }],
+      } satisfies JsonRecord;
     },
   });
 
