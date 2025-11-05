@@ -79,6 +79,7 @@ All tools are safe for STDIO. The server writes logs to stderr only.
 - memory-recall
   - Retrieve up to `k` relevant memories for an owner via text/semantic search. Accepts optional natural-language `query`, optional `embedding`, and optional `slot` (type).
   - Response is minimal per item: `{ id, type, subject, content }`.
+  - Tip: If you need to delete, use recall to find the id, then call `memory-forget`.
 
 - memory-list
   - List recent memories for an owner, optionally filtered by `slot` (type).
@@ -86,6 +87,7 @@ All tools are safe for STDIO. The server writes logs to stderr only.
 
 - memory-forget
   - Delete a memory by `id`. Consider recalling/listing first if you need to verify the item.
+  - Tip: Do not create a new memory to indicate "forgotten"—delete the original instead.
 
 - memory-export
   - Export all memories for an owner as a JSON array. Useful for backup/migration.

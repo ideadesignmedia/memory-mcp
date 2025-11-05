@@ -197,7 +197,7 @@ const rememberTool = defineFunctionTool({
   function: {
     name: "memory-remember",
     description:
-      "Create a concise memory for an owner. Provide a type (slot), short subject and content. Optionally include importance (0-1), ttlDays, pinned, consent, sensitivity tags, and an embedding. Response is minimal: { id, type, subject, content } (no embeddings or extra metadata).",
+      "Create a concise memory for an owner. Provide a type (slot), short subject and content. Optionally include importance (0-1), ttlDays, pinned, consent, sensitivity tags, and an embedding. Response is minimal: { id, type, subject, content } (no embeddings or extra metadata). Do NOT use this tool to 'forget' or override facts—use memory-forget after locating the item via memory-recall or memory-list.",
     parameters: rememberParameters,
   },
 } as const);
@@ -207,7 +207,7 @@ const recallTool = defineFunctionTool({
   function: {
     name: "memory-recall",
     description:
-      "Retrieve up to k relevant memories for an owner by semantic/text search. Provide optional natural-language query and/or embedding, and an optional type (slot). Returns ranked items with subject, content, importance, recency, and id.",
+      "Retrieve up to k relevant memories for an owner by semantic/text search. Provide optional natural-language query and/or embedding, and an optional type (slot). Returns minimal items with id, type, subject, content. If your goal is to delete, use this to find the id, then call memory-forget.",
     parameters: recallParameters,
   },
 } as const);
