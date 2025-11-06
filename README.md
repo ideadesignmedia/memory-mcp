@@ -65,7 +65,7 @@ await runStdioServer({
 
 - memory-create
   - Create a memory with `subject`, `content`. Optionally include `ttlDays` (to compute `expires_at`).
-  - Response is minimal: `{ id, subject, content }`.
+  - Response: `{ ok: true }` on success, or `{ ok: false, error: string }` on failure.
 
 - memory-search
   - Search globally by text with optional `k` (semantic ranking used internally when available).
@@ -73,12 +73,18 @@ await runStdioServer({
 
 - memory-update
   - Update fields of a memory by `id`: `subject`, `content`, `ttlDays` (recomputes `expires_at`), or `expiresAt`.
+  - Response: `{ ok: true }` on success, or `{ ok: false, error: string }` on failure.
 
 - memory-delete
   - Delete a memory by `id`.
+  - Response: `{ ok: true }` on success, or `{ ok: false, error: string }` on failure.
+
+- memory-get
+  - Fetch a single memory by `id`.
+  - Response item: `{ id, subject, content, dateCreated, dateUpdated }`.
 
 ## Embeddings
-Embeddings are optional—without a key the server relies on text search. Embeddings are not accepted via tools.
+Embeddings are optional—without a key the server relies on text search. Embeddings are internal only; they are never accepted from or returned to clients.
 
 Set `MEMORY_EMBEDDING_KEY` (or pass `--embed-key=...` to the CLI) to automatically create embeddings when remembering/importing memories and to embed recall queries. The default model is `text-embedding-3-small`; override it with `MEMORY_EMBED_MODEL` or `--embed-model`. To disable the built-in generator when using the programmatic API, pass `embeddingProvider: null` to `createMemoryMcpServer`. To specify a key programmatically, pass `embeddingApiKey: "sk-..."`.
 

@@ -64,6 +64,15 @@ const deleteParameters = defineObjectSchema({
   additionalProperties: false,
 } as const);
 
+const getParameters = defineObjectSchema({
+  type: "object",
+  properties: {
+    id: { type: "string", minLength: 1, description: "ID of the memory to fetch." },
+  },
+  required: ["id"],
+  additionalProperties: false,
+} as const);
+
 // no export/import tools in v2 minimal API
 
 const createInputSchema = z.object({
@@ -86,12 +95,13 @@ const updateInputSchema = z.object({
 });
 
 const deleteInputSchema = z.object({ id: z.string().min(1) });
+const getInputSchema = z.object({ id: z.string().min(1) });
 
 const createTool = defineFunctionTool({
   type: "function",
   function: {
     name: "memory-create",
-    description: "Persist a concise, reusable memory. Provide a short subject and one–two sentence content. Optionally set ttlDays to control retention. Do not store secrets or ephemeral state. Returns { id, subject, content }.\nExample: {\"subject\":\"favorite color\",\"content\":\"blue\",\"ttlDays\":30}",
+    description: "Persist a concise, reusable memory. Provide a short subject and one–two sentence content. Optionally set ttlDays to control retention. Do not store secrets or ephemeral state. Returns { ok } or { ok:false, error }. Use memory-get or memory-search to retrieve items.\nExample: {\"subject\":\"favorite color\",\"content\":\"blue\",\"ttlDays\":30}",
     parameters: createParameters,
   },
 } as const);
@@ -100,7 +110,7 @@ const searchTool = defineFunctionTool({
   type: "function",
   function: {
     name: "memory-search",
-    description: "Find relevant memories and IDs by natural-language search. Use this before update/delete to locate the correct item. Returns up to k items as { id, subject, content }.\nExample: {\"query\":\"favorite color\",\"k\":6}",
+    description: "Find relevant memories and IDs by natural-language search. Use this before update/delete to locate the correct item. Returns up to k items as { id, subject, content }.\nExample: {\"query\":\"favorite color\",\"k\":6}. Never returns embeddings.",
     parameters: searchParameters,
   },
 } as const);
@@ -109,7 +119,7 @@ const updateTool = defineFunctionTool({
   type: "function",
   function: {
     name: "memory-update",
-    description: "Modify an existing memory by id. Provide only fields that change (subject/content). To extend retention, pass ttlDays or set an explicit expiresAt. Use memory-search first to confirm the id.\nExample: {\"id\":\"mem_123\",\"content\":\"blue (specifically navy)\",\"ttlDays\":60}",
+    description: "Modify an existing memory by id. Provide only fields that change (subject/content). To extend retention, pass ttlDays or set an explicit expiresAt. Use memory-search first to confirm the id. Returns { ok } or { ok:false, error }.\nExample: {\"id\":\"mem_123\",\"content\":\"blue (specifically navy)\",\"ttlDays\":60}",
     parameters: updateParameters,
   },
 } as const);
@@ -118,8 +128,17 @@ const deleteTool = defineFunctionTool({
   type: "function",
   function: {
     name: "memory-delete",
-    description: "Permanently delete a memory by id. Use memory-search first to confirm the exact item to remove.\nExample: {\"id\":\"mem_123\"}",
+    description: "Permanently delete a memory by id. Use memory-search first to confirm the exact item to remove. Returns { ok } or { ok:false, error }.\nExample: {\"id\":\"mem_123\"}",
     parameters: deleteParameters,
+  },
+} as const);
+
+const getTool = defineFunctionTool({
+  type: "function",
+  function: {
+    name: "memory-get",
+    description: "Fetch a specific memory by id. Returns { id, subject, content, dateCreated, dateUpdated }.",
+    parameters: getParameters,
   },
 } as const);
 
@@ -196,15 +215,18 @@ export function createMemoryMcpServer({
   server.registerTool({
     tool: createTool,
     async handler(rawArgs) {
-      const args = createInputSchema.parse(rawArgs);
-      await store.cleanupExpired();
-      const ttl = typeof args.ttlDays === 'string' ? parseInt(args.ttlDays, 10) : args.ttlDays;
-      const ttlDays = Number.isFinite(ttl as number) ? (ttl as number) : undefined;
-      const autoEmbedding = await tryEmbedDocument(embeddingProvider, memoryToEmbeddingText(args.subject, args.content));
-      const id = await store.insert({ subject: args.subject, content: args.content, ttlDays, embedding: autoEmbedding });
-      const saved = await store.get(id);
-      const lite: JsonRecord = saved ? { id: saved.id, subject: saved.subject, content: saved.content } : { id } as any;
-      return { id, item: lite, content: [{ type: "text", text: JSON.stringify(lite, null, 2) }] } as JsonRecord;
+      try {
+        const args = createInputSchema.parse(rawArgs);
+        await store.cleanupExpired();
+        const ttl = typeof args.ttlDays === 'string' ? parseInt(args.ttlDays, 10) : args.ttlDays;
+        const ttlDays = Number.isFinite(ttl as number) ? (ttl as number) : undefined;
+        const autoEmbedding = await tryEmbedDocument(embeddingProvider, memoryToEmbeddingText(args.subject, args.content));
+        await store.insert({ subject: args.subject, content: args.content, ttlDays, embedding: autoEmbedding });
+        return { ok: true } as JsonRecord;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: msg } as JsonRecord;
+      }
     },
   });
 
@@ -216,35 +238,60 @@ export function createMemoryMcpServer({
       const qEmbedding = query ? await tryEmbedQuery(embeddingProvider, query) : undefined;
       const items = await store.search(query, Number(k ?? defaultTopK), qEmbedding);
       const serialized = items.map(serializeMemoryItem);
-      return { items: serialized, content: [{ type: "text", text: JSON.stringify(serialized, null, 2) }] } as JsonRecord;
+      return { items: serialized } as JsonRecord;
     },
   });
 
   server.registerTool({
     tool: updateTool,
     async handler(rawArgs) {
-      const { id, subject, content, ttlDays, expiresAt } = updateInputSchema.parse(rawArgs);
-      const ttlParsed = typeof ttlDays === 'string' ? parseInt(ttlDays, 10) : ttlDays;
-      const patch: any = { subject, content, ttlDays: Number.isFinite(ttlParsed as number) ? (ttlParsed as number) : undefined, expiresAt };
-      if (typeof subject === 'string' || typeof content === 'string') {
-        const current = await store.get(id);
-        const nextSub = typeof subject === 'string' ? subject : current?.subject ?? '';
-        const nextCon = typeof content === 'string' ? content : current?.content ?? '';
-        patch.embedding = await tryEmbedDocument(embeddingProvider, memoryToEmbeddingText(nextSub, nextCon));
+      try {
+        const { id, subject, content, ttlDays, expiresAt } = updateInputSchema.parse(rawArgs);
+        const ttlParsed = typeof ttlDays === 'string' ? parseInt(ttlDays, 10) : ttlDays;
+        const patch: any = { subject, content, ttlDays: Number.isFinite(ttlParsed as number) ? (ttlParsed as number) : undefined, expiresAt };
+        if (typeof subject === 'string' || typeof content === 'string') {
+          const current = await store.get(id);
+          const nextSub = typeof subject === 'string' ? subject : current?.subject ?? '';
+          const nextCon = typeof content === 'string' ? content : current?.content ?? '';
+          patch.embedding = await tryEmbedDocument(embeddingProvider, memoryToEmbeddingText(nextSub, nextCon));
+        }
+        await store.update(id, patch);
+        return { ok: true } as JsonRecord;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: msg } as JsonRecord;
       }
-      await store.update(id, patch);
-      const saved = await store.get(id);
-      const lite: JsonRecord = saved ? { id: saved.id, subject: saved.subject, content: saved.content } : { id } as any;
-      return { id, item: lite, content: [{ type: "text", text: JSON.stringify(lite, null, 2) }] } as JsonRecord;
     },
   });
 
   server.registerTool({
     tool: deleteTool,
     async handler(rawArgs) {
-      const { id } = deleteInputSchema.parse(rawArgs);
-      await store.delete(id);
-      return { ok: true, content: [{ type: "text", text: "true" }] } as JsonRecord;
+      try {
+        const { id } = deleteInputSchema.parse(rawArgs);
+        await store.delete(id);
+        return { ok: true } as JsonRecord;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: msg } as JsonRecord;
+      }
+    },
+  });
+
+  server.registerTool({
+    tool: getTool,
+    async handler(rawArgs) {
+      const { id } = getInputSchema.parse(rawArgs);
+      const found = await store.get(id);
+      if (!found) return { ok: false, error: "Memory not found" } as JsonRecord;
+      const item = {
+        id: found.id,
+        subject: found.subject,
+        content: found.content,
+        dateCreated: found.dateCreated,
+        dateUpdated: found.dateUpdated,
+      } as const;
+      return { item } as JsonRecord;
     },
   });
 
