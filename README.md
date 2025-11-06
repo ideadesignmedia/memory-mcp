@@ -2,11 +2,11 @@
 
 SQLite-backed memory for MCP agents. Ships a CLI and programmatic API.
 
-Highlights
-- Uses `sqlite3` (async) for broad prebuilt support; no brittle native build steps.
+Highlights (v2)
+- Single global memory space; no owner segregation nor types.
+- Minimal schema: subject, content, date_created, date_updated, expires_at (embedding is internal-only).
 - Optional FTS5 indexing for better search; falls back to `LIKE` when unavailable.
-- Input validation and sane limits to guard against oversized payloads.
-- Auto-generates semantic embeddings via OpenAI when a key is provided; otherwise falls back to text-only scoring.
+- Auto-generates embeddings internally via OpenAI when a key is provided; otherwise relies on text search. Embeddings are never accepted from nor returned to MCP clients.
 
 ## Install / Run
 
@@ -61,48 +61,28 @@ await runStdioServer({
 });
 ```
 
-## Tools
+## Tools (v2)
 
-All tools are safe for STDIO. The server writes logs to stderr only.
+- memory-create
+  - Create a memory with `subject`, `content`. Optionally include `ttlDays` (to compute `expires_at`).
+  - Response is minimal: `{ id, subject, content }`.
 
-- memory-remember
-  - Create a concise memory for an owner. Provide `ownerId`, `type` (slot), short `subject`, and `content`. Optionally set `importance` (0–1), `ttlDays`, `pinned`, `consent`, `sensitivity` (tags), and `embedding`.
-  - Response is minimal for LLMs (no embeddings or extra metadata):
-    ```json
-    {
-      "id": "mem_...",
-      "item": { "id": "mem_...", "type": "preference", "subject": "favorite color", "content": "blue" },
-      "content": [ { "type": "text", "text": "{\"id\":\"mem_...\",\"type\":\"preference\",\"subject\":\"favorite color\",\"content\":\"blue\"}" } ]
-    }
-    ```
+- memory-search
+  - Search globally by text with optional `k` (semantic ranking used internally when available).
+  - Response items: `{ id, subject, content }`.
 
-- memory-recall
-  - Retrieve up to `k` relevant memories for an owner via text/semantic search. Accepts optional natural-language `query`, optional `embedding`, and optional `slot` (type).
-  - Response is minimal per item: `{ id, type, subject, content }`.
-  - Tip: If you need to delete, use recall to find the id, then call `memory-forget`.
+- memory-update
+  - Update fields of a memory by `id`: `subject`, `content`, `ttlDays` (recomputes `expires_at`), or `expiresAt`.
 
-- memory-list
-  - List recent memories for an owner, optionally filtered by `slot` (type).
-  - Response is minimal per item: `{ id, type, subject, content }`.
-
-- memory-forget
-  - Delete a memory by `id`. Consider recalling/listing first if you need to verify the item.
-  - Tip: Do not create a new memory to indicate "forgotten"—delete the original instead.
-
-- memory-export
-  - Export all memories for an owner as a JSON array. Useful for backup/migration.
-  - Response items are minimal: `{ id, type, subject, content }`.
-
-- memory-import
-  - Bulk import memories for an owner. Each item mirrors the memory schema (`type`, `subject`, `content`, metadata, optional `embedding`). Max 1000 items per call.
+- memory-delete
+  - Delete a memory by `id`.
 
 ## Embeddings
-## Embeddings
-Embeddings are optional—without a key the server relies on text search and recency heuristics.
+Embeddings are optional—without a key the server relies on text search. Embeddings are not accepted via tools.
 
 Set `MEMORY_EMBEDDING_KEY` (or pass `--embed-key=...` to the CLI) to automatically create embeddings when remembering/importing memories and to embed recall queries. The default model is `text-embedding-3-small`; override it with `MEMORY_EMBED_MODEL` or `--embed-model`. To disable the built-in generator when using the programmatic API, pass `embeddingProvider: null` to `createMemoryMcpServer`. To specify a key programmatically, pass `embeddingApiKey: "sk-..."`.
 
-Limits and validation
-- memory-remember: `subject` max 160 chars, `content` max 1000, `sensitivity` up to 32 tags.
-- memory-recall: optional `query` max 1000 chars; if omitted, listing is capped internally.
-- memory-import: up to 1000 items per call; each item has the same field limits as remember.
+Limits and validation (v2)
+- memory-create: `subject` max 160 chars; `content` max 2000; optional `ttlDays`.
+- memory-search: optional `query` max 1000; `k` up to 20.
+- memory-update: accepts partial fields; `ttlDays` recomputes `expires_at`.

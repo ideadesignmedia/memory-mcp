@@ -1,6 +1,6 @@
 import sqlite3 from "sqlite3";
 import { randomUUID } from "crypto";
-import { MemoryItem, MemoryType } from "./types.js";
+import { MemoryItem } from "./types.js";
 import { nowIso, logErr, cosineSimilarity } from "./util.js";
 
 export class MemoryStore {
@@ -13,59 +13,43 @@ export class MemoryStore {
     this.ready = new Promise((resolve) => {
       this.db.serialize(() => {
         this.db.exec(
-          `create table if not exists memories (
+          `create table if not exists memories_v2 (
             id text primary key,
-            owner_id text not null,
-            type text not null,
             subject text not null,
             content text not null,
-            importance real not null default 0.5,
-            use_count integer not null default 0,
-            created_at text not null,
-            last_used_at text,
+            date_created text not null,
+            date_updated text not null,
             expires_at text,
-            pinned integer not null default 0,
-            consent integer not null default 0,
-            sensitivity text not null default '[]',
             embedding text
           );`,
           (err) => {
-            if (err) logErr("fatal: migrate base table:", err.message || String(err));
-            this.ensureEmbeddingColumn(() => {
-              // Try to enable FTS structures; ignore if unavailable
-              this.db.exec(
-                `create virtual table if not exists memory_fts using fts5(
-                   subject, content, content='memories', content_rowid='rowid'
-                 );
-                 create trigger if not exists memories_ai after insert on memories begin
-                   insert into memory_fts(rowid, subject, content) values (new.rowid, new.subject, new.content);
-                 end;
-                 create trigger if not exists memories_au after update on memories begin
-                   update memory_fts set subject = new.subject, content = new.content where rowid = new.rowid;
-                 end;
-                 create trigger if not exists memories_ad after delete on memories begin
-                   delete from memory_fts where rowid = old.rowid;
-                 end;`,
-                (ftsErr) => {
-                  if (ftsErr) logErr("warn: FTS5 unavailable, LIKE fallback enabled");
-                  resolve();
-                }
-              );
-            });
+            if (err) logErr("fatal: migrate v2 table:", err.message || String(err));
+            // Try to enable FTS structures; ignore if unavailable
+            this.db.exec(
+              `create virtual table if not exists memories_v2_fts using fts5(
+                 subject, content, content='memories_v2', content_rowid='rowid'
+               );
+               create trigger if not exists memories_v2_ai after insert on memories_v2 begin
+                 insert into memories_v2_fts(rowid, subject, content) values (new.rowid, new.subject, new.content);
+               end;
+               create trigger if not exists memories_v2_au after update on memories_v2 begin
+                 update memories_v2_fts set subject = new.subject, content = new.content where rowid = new.rowid;
+               end;
+               create trigger if not exists memories_v2_ad after delete on memories_v2 begin
+                 delete from memories_v2_fts where rowid = old.rowid;
+               end;`,
+              (ftsErr) => {
+                if (ftsErr) logErr("warn: FTS5 unavailable for v2, LIKE fallback enabled");
+                resolve();
+              }
+            );
           }
         );
       });
     });
   }
 
-  private ensureEmbeddingColumn(callback: () => void) {
-    this.db.exec("alter table memories add column embedding text;", (err) => {
-      if (err && !(err.message && /duplicate column/i.test(err.message))) {
-        logErr("warn: add embedding column:", err.message || String(err));
-      }
-      callback();
-    });
-  }
+  // v2: embedding column is part of base table
 
   private normalizeEmbedding(vec?: number[]): number[] | undefined {
     if (!Array.isArray(vec)) return undefined;
@@ -106,101 +90,103 @@ export class MemoryStore {
     });
   }
 
-  async cleanupExpired(ownerId?: string) {
+  async cleanupExpired() {
     await this.ready;
-    const sqlWithOwner =
-      "delete from memories where expires_at is not null and datetime(expires_at) <= datetime('now') and owner_id = ?";
-    const sqlAll =
-      "delete from memories where expires_at is not null and datetime(expires_at) <= datetime('now')";
-    if (ownerId) await this.run(sqlWithOwner, [ownerId]);
-    else await this.run(sqlAll);
+    await this.run(
+      "delete from memories_v2 where expires_at is not null and datetime(expires_at) <= datetime('now')"
+    );
   }
 
-  async insert(opts: {
-    ownerId: string; type: MemoryType; subject: string; content: string;
-    importance?: number; ttlDays?: number; pinned?: boolean; consent?: boolean; sensitivity?: string[];
-    embedding?: number[];
-  }): Promise<string> {
+  async insert(opts: { subject: string; content: string; ttlDays?: number; embedding?: number[] }): Promise<string> {
     await this.ready;
     const id = randomUUID();
-    const createdAt = nowIso();
-    const expiresAt = opts.ttlDays ? new Date(Date.now() + opts.ttlDays * 864e5).toISOString() : null;
+    const now = nowIso();
+    const expiresAt = typeof opts.ttlDays === 'number' && Number.isFinite(opts.ttlDays)
+      ? new Date(Date.now() + Math.trunc(opts.ttlDays) * 864e5).toISOString()
+      : null;
     const embedding = this.normalizeEmbedding(opts.embedding);
     await this.run(
-      `insert into memories (id, owner_id, type, subject, content, importance, use_count, created_at, expires_at, pinned, consent, sensitivity, embedding)
-       values (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      `insert into memories_v2 (id, subject, content, date_created, date_updated, expires_at, embedding)
+       values (?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
-        opts.ownerId,
-        opts.type,
         opts.subject,
         opts.content,
-        opts.importance ?? 0.5,
-        createdAt,
+        now,
+        now,
         expiresAt,
-        opts.pinned ? 1 : 0,
-        opts.consent ? 1 : 0,
-        JSON.stringify(opts.sensitivity ?? []),
         embedding ? JSON.stringify(embedding) : null,
       ]
     );
     return id;
   }
 
-  async bumpUse(id: string) {
+  async update(id: string, patch: { subject?: string; content?: string; ttlDays?: number; expiresAt?: string; embedding?: number[] }) {
     await this.ready;
-    await this.run("update memories set use_count = use_count + 1, last_used_at = ? where id = ?", [nowIso(), id]);
+    const fields: string[] = [];
+    const params: any[] = [];
+    if (typeof patch.subject === 'string') { fields.push('subject = ?'); params.push(patch.subject); }
+    if (typeof patch.content === 'string') { fields.push('content = ?'); params.push(patch.content); }
+    if (typeof patch.ttlDays !== 'undefined') {
+      const newExp = typeof patch.ttlDays === 'number' && Number.isFinite(patch.ttlDays)
+        ? new Date(Date.now() + Math.trunc(patch.ttlDays) * 864e5).toISOString()
+        : null;
+      fields.push('expires_at = ?'); params.push(newExp);
+    }
+    if (typeof patch.expiresAt === 'string') { fields.push('expires_at = ?'); params.push(patch.expiresAt); }
+    if (Array.isArray(patch.embedding)) {
+      const norm = this.normalizeEmbedding(patch.embedding);
+      fields.push('embedding = ?'); params.push(norm ? JSON.stringify(norm) : null);
+    }
+    fields.push('date_updated = ?'); params.push(nowIso());
+    if (fields.length === 0) return;
+    const sql = `update memories_v2 set ${fields.join(', ')} where id = ?`;
+    params.push(id);
+    await this.run(sql, params);
   }
 
-  async forget(id: string) {
+  async delete(id: string) {
     await this.ready;
-    await this.run("delete from memories where id = ?", [id]);
+    await this.run("delete from memories_v2 where id = ?", [id]);
   }
 
   async get(id: string): Promise<MemoryItem | undefined> {
     await this.ready;
-    const rows = await this.all<any>("select * from memories where id = ? limit 1", [id]);
+    const rows = await this.all<any>("select * from memories_v2 where id = ? limit 1", [id]);
     if (!rows || rows.length === 0) return undefined;
     return this.rowToItem(rows[0]);
   }
 
-  async list(ownerId: string, slot?: MemoryType, limit = 200): Promise<MemoryItem[]> {
+  async list(limit = 200): Promise<MemoryItem[]> {
     await this.ready;
-    const rows = slot
-      ? await this.all<any>("select * from memories where owner_id = ? and type = ? limit ?", [ownerId, slot, limit])
-      : await this.all<any>("select * from memories where owner_id = ? limit ?", [ownerId, limit]);
+    const rows = await this.all<any>("select * from memories_v2 order by date_updated desc limit ?", [limit]);
     return rows.map((r) => this.rowToItem(r));
   }
 
-  async export(ownerId: string): Promise<MemoryItem[]> {
+  async exportAll(): Promise<MemoryItem[]> {
     await this.ready;
-    const rows = await this.all<any>("select * from memories where owner_id = ?", [ownerId]);
+    const rows = await this.all<any>("select * from memories_v2 order by date_created asc", []);
     return rows.map((r) => this.rowToItem(r));
   }
 
-  async import(ownerId: string, items: Omit<MemoryItem, "ownerId" | "id" | "createdAt">[]) {
+  async importAll(items: Array<Omit<MemoryItem, "id" | "dateCreated" | "dateUpdated">>) {
     await this.ready;
     await this.run("BEGIN IMMEDIATE");
     try {
       for (const it of items) {
         const embedding = this.normalizeEmbedding(it.embedding);
+        const id = randomUUID();
+        const now = nowIso();
         await this.run(
-          `insert into memories (id, owner_id, type, subject, content, importance, use_count, created_at, last_used_at, expires_at, pinned, consent, sensitivity, embedding)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `insert into memories_v2 (id, subject, content, date_created, date_updated, expires_at, embedding)
+           values (?, ?, ?, ?, ?, ?, ?)`,
           [
-            randomUUID(),
-            ownerId,
-            it.type,
+            id,
             it.subject,
             it.content,
-            it.importance ?? 0.5,
-            it.useCount ?? 0,
-            nowIso(),
-            it.lastUsedAt ?? null,
+            now,
+            now,
             it.expiresAt ?? null,
-            it.pinned ? 1 : 0,
-            it.consent ? 1 : 0,
-            JSON.stringify(it.sensitivity ?? []),
             embedding ? JSON.stringify(embedding) : null,
           ]
         );
@@ -212,7 +198,7 @@ export class MemoryStore {
     }
   }
 
-  async search(ownerId: string, query?: string, slot?: MemoryType, k = 8, embedding?: number[]): Promise<MemoryItem[]> {
+  async search(query?: string, k = 8, embedding?: number[]): Promise<MemoryItem[]> {
     await this.ready;
     const trimmedQuery = query?.trim() ?? "";
     const hasQuery = trimmedQuery.length > 0;
@@ -221,12 +207,8 @@ export class MemoryStore {
 
     if (!hasQuery && queryEmbedding) {
       const limit = Math.max(k * fetchMultiplier, 50);
-      const sqlEmbed = slot
-        ? `select * from memories where owner_id = ? and type = ? and embedding is not null limit ?`
-        : `select * from memories where owner_id = ? and embedding is not null limit ?`;
-      const rows = slot
-        ? await this.all<any>(sqlEmbed, [ownerId, slot, limit])
-        : await this.all<any>(sqlEmbed, [ownerId, limit]);
+      const sqlEmbed = `select * from memories_v2 where embedding is not null order by date_updated desc limit ?`;
+      const rows = await this.all<any>(sqlEmbed, [limit]);
       return rows
         .map((r) => this.rowToItem(r))
         .map((item) => ({ item, sim: cosineSimilarity(queryEmbedding, item.embedding) }))
@@ -235,20 +217,16 @@ export class MemoryStore {
         .map(({ item }) => item);
     }
 
-    if (!hasQuery) {
-      return this.list(ownerId, slot, Math.max(50, k * fetchMultiplier));
-    }
+    if (!hasQuery) return this.list(Math.max(50, k * fetchMultiplier));
 
     const base = `
-      select m.* from memory_fts f
-      join memories m on m.rowid = f.rowid
-      where m.owner_id = ? and memory_fts match ?
+      select m.* from memories_v2_fts f
+      join memories_v2 m on m.rowid = f.rowid
+      where memories_v2_fts match ?
     `;
-    const sql = slot ? `${base} and m.type = ? limit ?` : `${base} limit ?`;
+    const sql = `${base} limit ?`;
     try {
-      const rows = slot
-        ? await this.all<any>(sql, [ownerId, trimmedQuery, slot, k * fetchMultiplier])
-        : await this.all<any>(sql, [ownerId, trimmedQuery, k * fetchMultiplier]);
+      const rows = await this.all<any>(sql, [trimmedQuery, k * fetchMultiplier]);
       const items = rows.map((r) => this.rowToItem(r));
       if (!queryEmbedding) return items;
       return items
@@ -259,12 +237,8 @@ export class MemoryStore {
     } catch {
       const esc = trimmedQuery.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
       const like = `%${esc}%`;
-      const sqlLike = slot
-        ? `select * from memories where owner_id = ? and type = ? and (subject like ? escape '\\' or content like ? escape '\\') limit ?`
-        : `select * from memories where owner_id = ? and (subject like ? escape '\\' or content like ? escape '\\') limit ?`;
-      const rows = slot
-        ? await this.all<any>(sqlLike, [ownerId, slot, like, like, k * fetchMultiplier])
-        : await this.all<any>(sqlLike, [ownerId, like, like, k * fetchMultiplier]);
+      const sqlLike = `select * from memories_v2 where (subject like ? escape '\\' or content like ? escape '\\') order by date_updated desc limit ?`;
+      const rows = await this.all<any>(sqlLike, [like, like, k * fetchMultiplier]);
       const items = rows.map((r) => this.rowToItem(r));
       if (!queryEmbedding) return items;
       return items
@@ -276,28 +250,14 @@ export class MemoryStore {
   }
 
   private rowToItem(row: any): MemoryItem {
-    let sensitivity: string[] = [];
-    try {
-      sensitivity = JSON.parse(row.sensitivity ?? "[]");
-      if (!Array.isArray(sensitivity)) sensitivity = [];
-    } catch {
-      sensitivity = [];
-    }
     const embedding = this.parseEmbedding(row.embedding);
     return {
       id: row.id,
-      ownerId: row.owner_id,
-      type: row.type,
       subject: row.subject,
       content: row.content,
-      importance: row.importance,
-      useCount: row.use_count,
-      createdAt: row.created_at,
-      lastUsedAt: row.last_used_at ?? undefined,
+      dateCreated: row.date_created,
+      dateUpdated: row.date_updated,
       expiresAt: row.expires_at ?? undefined,
-      pinned: !!row.pinned,
-      consent: !!row.consent,
-      sensitivity,
       embedding,
     };
   }

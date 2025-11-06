@@ -1,18 +1,10 @@
-export type MemoryType = "preference" | "profile" | "project" | "fact" | "constraint";
-
+// v2 minimal memory item (no owners, no categories)
 export interface MemoryItem {
   id: string;
-  ownerId: string;
-  type: MemoryType;
   subject: string;
   content: string;
-  importance: number;
-  useCount: number;
-  createdAt: string;
-  lastUsedAt?: string;
+  dateCreated: string;
+  dateUpdated: string;
   expiresAt?: string;
-  pinned: boolean;
-  consent: boolean;
-  sensitivity: string[];
   embedding?: number[];
 }

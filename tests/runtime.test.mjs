@@ -14,18 +14,13 @@ const createTempDbPath = async () => {
   return { dbPath: join(dir, `memory-${randomUUID()}.sqlite`), dir };
 };
 
-test("MemoryStore can insert and list records", async (t) => {
+test("MemoryStore v2 can insert and list records", async (t) => {
   const { dbPath, dir } = await createTempDbPath();
 
   const store = new MemoryStore(dbPath);
-  const id = await store.insert({
-    ownerId: "user-1",
-    type: "fact",
-    subject: "test subject",
-    content: "test content",
-  });
+  const id = await store.insert({ subject: "test subject", content: "test content" });
 
-  const items = await store.list("user-1");
+  const items = await store.list();
   assert.equal(items.length, 1);
   assert.equal(items[0]?.id, id);
   assert.equal(items[0]?.subject, "test subject");
@@ -33,7 +28,7 @@ test("MemoryStore can insert and list records", async (t) => {
   await rm(dir, { recursive: true, force: true });
 });
 
-test("Server factory builds without embedding provider", async () => {
+test("Server v2 factory builds without embedding provider", async () => {
   const server = createMemoryMcpServer({
     dbPath: ":memory:",
     embeddingProvider: null,
